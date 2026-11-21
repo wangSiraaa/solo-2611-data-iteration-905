@@ -1,0 +1,30 @@
+{
+  "experiment_id": "T001",
+  "orders": [
+    {
+      "order_id": "T001-O1",
+      "outlet_ids": ["L", "R"],
+      "opens": 1,
+      "cell_max": [{"cell": [0, 2], "max": 0}],
+      "total_max": null,
+      "budget": 1
+    },
+    {
+      "order_id": "T001-O1MID",
+      "outlet_ids": ["L", "R"],
+      "opens": 1,
+      "cell_max": [{"cell": [0, 2], "max": 0}],
+      "total_max": null,
+      "budget": 100,
+      "allowed_points": ["PM"]
+    },
+    {
+      "order_id": "T001-O3",
+      "outlet_ids": ["L", "R"],
+      "opens": 1,
+      "cell_max": [{"cell": [0, 2], "max": 2}],
+      "total_max": null,
+      "budget": 0
+    }
+  ]
+}

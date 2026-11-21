@@ -1,14 +1,16 @@
-# slabwater — 分块标高接缝与有开闸上限的蓄水核验
+# slabwater — 分块标高接缝、有开闸上限的蓄水核验与自适应询测
 
 纯合成离散模型，仅用于可复现的规则核验，**不用于现场水利判断**。
 
-实现为 Python 3.11 独立库（仅标准库 + SQLite），分三层：
+实现为 Python 3.11 独立库（仅标准库 + SQLite），分四层：
 
 | 模块 | 职责 |
 | --- | --- |
 | `slabwater/catalog.py` | 独立、只追加的分块标高目录；批次校验、冻结切面、逐格来源 |
 | `slabwater/solver.py` | 水位/蓄水计算；按出口集合搜索可行计划 |
 | `slabwater/publisher.py` | 发布、幂等复读、拒绝留证、核计划、重开 |
+| `slabwater/experiment.py` | 按试验号封存有限切面、正费用复测点与逐点准确读数 |
+| `slabwater/surveyor.py` | 最小最坏费用的自适应询测单、两类不可行诊断、可分叉会话 |
 
 ## 目录（Catalog）
 
@@ -94,6 +96,76 @@ python3 -m slabwater verify /tmp/run772 <plan_id>
 python3 -m slabwater reopen /tmp/run772 <plan_id>
 ```
 
+## 询测（Experiment / Surveyor）
+
+交接时只留下几份都通过接缝检查的测绘草案，现场铺的是哪一版要复测后才知道。
+询测层在一个**试验号**下封存：有限个候选切面（≤16）、一组带**正整数费用**的复测点
+（≤12）、候选出口（≤8），以及每个切面在每个点会给出的**准确读数**。
+
+- 读数是**不开任何出口**时该格的蓄水（全部格面顶到 `ceiling`，读数 = `ceiling − 格高`），
+  由 `solver` 引擎在封存时重算；输入声明的读数若与重算不符，整份封存被拒
+  （`readings_mismatch`）。只接受合成格面，重复格面按 `duplicate_surface` 拒绝。
+- 试验只追加：同一 `experiment_id` 重复封存同内容则原样复读，换内容报
+  `experiment_id_conflict`，旧记录不动。
+- 一份读数回执 `[(point_id, value), ...]` 可随时查 `possible_slices`：只剔除被读数
+  排除的切面，资料不足时保留全部可能；读到任何切面都不会出现的值时返回空集
+  （`out_of_draft`），会话据此**停止签发并保留原回执**。
+
+### 询测单（自适应决策树）
+
+`SurveyOrder` 给出沿用出口 `outlet_ids`、最多开几个 `opens`、指定格蓄水上界
+`cell_max`（可选总量上界 `total_max`）与预算 `budget`。`plan_survey` 构造一棵决策树：
+
+- 内部节点 = 在某点复测，按读数分叉；叶子 = 对当时**所有剩余切面都可行**的出口集合，
+  不要求辨明具体切面。
+- 节点费用 = 该点费用 + 各分叉费用的最大值；规划器最小化**最坏分支费用**，同费用按点 id
+  确定性破并。可行性用与 `solver` 的 `reuse` 相同的逐出口瓶颈图组合，并在测试中与
+  `recompute` 全量搜索逐集合对账。
+- 两种失败严格区分：
+  - `no_distinguishing_point`：预算无限也无法把候选分成有共同可行出口的组。证据是
+    不可区分对（每个可用点上两版读数逐项相等、各自可行出口交集为空）或停滞候选集在
+    每个点上的划分。
+  - `insufficient_budget`：自适应方案存在，但最小最坏费用超过预算；返回
+    `achievable_cost` 与 `shortfall` 作为可核查理由。
+- 工单可用 `allowed_points` 限制只准测某些点（如“只会测中格”），不改变封存试验。
+
+### 可逐步执行、可重开的会话
+
+`SessionStore` 把每次询测持久化到 SQLite：`open` 后按 `next_step` 逐点 `record`；
+可在另一进程 `resume`，也可 `fork` 出空回执的独立会话走**另一条读数分支**
+（同一试验材料）。读到草案之外的值立即 `aborted`，不签任何出口，原回执逐条保留。
+
+```python
+from slabwater import ExperimentStore, SessionStore, SurveyOrder, plan_survey
+
+experiments = ExperimentStore("experiments.db")
+exp = experiments.seal(spec)                       # 封存（幂等复读）
+exp.possible_slices([("P1", 3)])                  # 回执查询：保留全部仍可能的切面
+
+order = SurveyOrder.from_dict(order_raw)
+result = plan_survey(exp, order)                  # 最小最坏费用询测单
+if not result.ok:
+    result.reason                                 # no_distinguishing_point / insufficient_budget
+    result.witnesses, result.diagnostic           # 可核查理由
+
+sessions = SessionStore("sessions.db", experiments)
+session = sessions.open_session(exp.experiment_id, order, result)
+step = session.next_step(exp)                     # {'action': 'measure', 'point_id': ...}
+session.record(exp, step["point_id"], value)      # 越界值 -> stopped，原回执保留
+```
+
+命令行：
+
+```bash
+python3 -m slabwater seal /tmp/survey materials/survey/T001_experiment.json
+python3 -m slabwater receipt /tmp/survey T001 --read P1=3
+python3 -m slabwater plan-order /tmp/survey T001 order.json
+python3 -m slabwater session /tmp/survey T002 order.json --action open
+python3 -m slabwater session /tmp/survey T002 order.json --action resume --session-id S-xxxx
+python3 -m slabwater session /tmp/survey T002 order.json --action record --session-id S-xxxx --point Q00 --value 2
+python3 -m slabwater survey-demo /tmp/survey materials/survey/T002_experiment.json materials/survey/T002_orders.json
+```
+
 ## 样例核对（materials/772）
 
 - 初版 `[0,4,1,4,0]`，双口全开：水位 `[1,4,4,4,3]`，蓄水 `[1,0,3,0,3]`，总 7，中格 3。
@@ -111,4 +183,7 @@ python3 -m unittest discover -s tests -v
 
 覆盖：切面/接缝/覆盖/越界/不可变修订/原子批次/重开；水位规则与“最低门槛不充分”；
 reuse 与 recompute 一致；修订使缓存失效；A1/A2/A3；幂等复读与冲突；版本隔离；
-核计划能发现篡改；12×12、8 出口压力与穷尽拒绝证据。
+核计划能发现篡改；12×12、8 出口压力与穷尽拒绝证据。询测层（`test_survey.py`，材料在
+`materials/survey/`）另覆盖：封存读数与回执查询、1×5 题述三场景、2×3 两层且第二测点
+随首答变化、两类不可行诊断、minimax 费用与确定性破并、会话持久化/分叉/越界中止、
+16/12/8 硬上限，以及询测可行性表与发布求解器的逐集合对账。

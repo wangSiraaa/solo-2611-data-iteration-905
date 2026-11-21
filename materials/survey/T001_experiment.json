@@ -1,0 +1,19 @@
+{
+  "experiment_id": "T001",
+  "height": 1,
+  "width": 5,
+  "ceiling": 3,
+  "slices": [
+    {"id": "A", "heights": [[0, 0, 0, 2, 0]]},
+    {"id": "B", "heights": [[0, 2, 0, 0, 0]]}
+  ],
+  "points": [
+    {"id": "P1", "cell": [0, 1], "cost": 1},
+    {"id": "P2", "cell": [0, 3], "cost": 1},
+    {"id": "PM", "cell": [0, 2], "cost": 1}
+  ],
+  "outlets": [
+    {"id": "L", "cell": [0, 0], "sill": 0},
+    {"id": "R", "cell": [0, 4], "sill": 0}
+  ]
+}
